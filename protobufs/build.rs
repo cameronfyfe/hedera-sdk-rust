@@ -32,30 +32,82 @@ const DERIVE_EQ_HASH: &str = "#[derive(Eq, Hash)]";
 const DERIVE_EQ_HASH_COPY: &str = "#[derive(Copy, Eq, Hash)]";
 const SERVICES_FOLDER: &str = "./protobufs/services";
 
+macro_rules! trace {
+    ($($args: expr),*) => {
+        print!("TRACE: file: {}, line: {}", file!(), line!());
+        $(
+            print!(", {}: {}", stringify!($args), $args);
+        )*
+        println!(""); // to get a new line at the end
+    }
+}
+
+fn print_dir_contents(path: &std::path::PathBuf) {
+    println!("Contents of {:?}", path.display());
+
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        println!("{:?}", path.display());
+                    }
+                    Err(e) => println!("Error reading entry: {}", e),
+                }
+            }
+        }
+        Err(e) => println!("Failed to read directory: {}", e),
+    }
+}
+
+fn set_files_writable_recursive<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
+    let metadata = fs::metadata(&path)?;
+    if metadata.is_file() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions)?;
+    } else if metadata.is_dir() {
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            set_files_writable_recursive(entry_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     // services is the "base" module for the hedera protobufs
     // in the beginning, there was only services and it was named "protos"
-
+    trace!();
     let services_path = Path::new(SERVICES_FOLDER);
-
+    trace!();
     // The contents of this folder will be copied and modified before it is
     // used for code generation. Later we will suppress generation of cargo
     // directives on the copy, so set a directive on the source.
     println!("cargo:rerun-if-changed={}", SERVICES_FOLDER);
-
+    trace!();
     if !services_path.is_dir() {
         anyhow::bail!("Folder {SERVICES_FOLDER} does not exist; do you need to `git submodule update --init`?");
     }
-
+    trace!();
     let out_dir = env::var("OUT_DIR")?;
     let out_path = Path::new(&out_dir);
     let services_tmp_path = out_path.join("services_src");
+    println!("OUT_DIR: {out_dir}");
+    println!("services_tmp_path: {}", services_tmp_path.display());
 
+    print_dir_contents(&std::path::PathBuf::from(&out_path));
+    
+    trace!();
     // ensure we start fresh
     let _ = fs::remove_dir_all(&services_tmp_path);
-
+    trace!();
     create_dir_all(&services_tmp_path)?;
-
+    print_dir_contents(&services_tmp_path);
+    trace!();
+    print_dir_contents(&std::path::PathBuf::from(services_path));
     // copy over services into our tmp path so we can edit
     fs_extra::copy_items(
         &[services_path],
@@ -64,34 +116,65 @@ fn main() -> anyhow::Result<()> {
     )?;
     fs::rename(out_path.join("services"), &services_tmp_path)?;
 
+    trace!();
+
+    print_dir_contents(&services_tmp_path);
+
+    let a = services_tmp_path.as_os_str().to_str().unwrap();
+    let r = std::process::Command::new("ls")
+        .args([a, "-l"])
+        .output()
+        .expect("failed to execute process");
+    let out = r.stdout;
+    let out = String::from_utf8(out).unwrap();
+    println!("ls -l");
+    println!("{out}");
+
+    set_files_writable_recursive(&services_tmp_path)?;
+
+    let a = services_tmp_path.as_os_str().to_str().unwrap();
+    let r = std::process::Command::new("ls")
+        .args([a, "-l"])
+        .output()
+        .expect("failed to execute process");
+    let out = r.stdout;
+    let out = String::from_utf8(out).unwrap();
+    println!("ls -l");
+    println!("{out}");
+
+    trace!();
     let services: Vec<_> = read_dir(&services_tmp_path)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             entry.file_type().ok()?.is_file().then(|| entry.path())
         })
         .collect();
-
+    trace!();
     // iterate through each file
     let re_package = RegexBuilder::new(r"^package (.*);$").multi_line(true).build()?;
+    trace!();
     for service in &services {
+        trace!();
         let contents = fs::read_to_string(service)?;
-
+        trace!();
         // ensure that every `package _` entry is `package proto;`
         let contents = re_package.replace(&contents, "package proto;");
-
+        trace!();
         // remove com.hedera.hapi.node.addressbook. prefix
         let contents = contents.replace("com.hedera.hapi.node.addressbook.", "");
-
+        trace!();
+        print_dir_contents(&services_tmp_path);
         fs::write(service, &*contents)?;
+        trace!();
     }
-
+    trace!();
     let mut cfg = tonic_build::configure()
         // We have already emitted a cargo directive to trigger a rerun on the source folder
         // that the copy this builds is based on. If the directives are not suppressed, the
         // crate will rebuild on every compile due to the modified time stamps post-dating
         // the start time of the compile action.
         .emit_rerun_if_changed(false);
-
+    trace!();
     // most of the protobufs in "basic types" should be Eq + Hash + Copy
     // any protobufs that would typically be used as parameter, that meet the requirements of those
     // traits
@@ -125,11 +208,11 @@ fn main() -> anyhow::Result<()> {
         .type_attribute("proto.GrantedCryptoAllowance", DERIVE_EQ_HASH)
         .type_attribute("proto.GrantedTokenAllowance", DERIVE_EQ_HASH)
         .type_attribute("proto.Duration", DERIVE_EQ_HASH_COPY);
-
+    trace!();
     // the ResponseCodeEnum should be marked as #[non_exhaustive] so
     // adding variants does not trigger a breaking change
     cfg = cfg.type_attribute("proto.ResponseCodeEnum", "#[non_exhaustive]");
-
+    trace!();
     // the ResponseCodeEnum is not documented in the proto source
     cfg = cfg.type_attribute(
         "proto.ResponseCodeEnum",
@@ -140,18 +223,18 @@ fn main() -> anyhow::Result<()> {
  successful transaction.
      "]"#,
     );
-
+    trace!();
     cfg.compile(&services, &[services_tmp_path])?;
-
+    trace!();
     // NOTE: prost generates rust doc comments and fails to remove the leading * line
     remove_useless_comments(&Path::new(&env::var("OUT_DIR")?).join("proto.rs"))?;
-
+    trace!();
     // mirror
     // NOTE: must be compiled in a separate folder otherwise it will overwrite the previous build
-
+    trace!();
     let mirror_out_dir = Path::new(&env::var("OUT_DIR")?).join("mirror");
     create_dir_all(&mirror_out_dir)?;
-
+    trace!();
     tonic_build::configure()
         .build_server(false)
         .extern_path(".proto.Timestamp", "crate::services::Timestamp")
@@ -170,32 +253,32 @@ fn main() -> anyhow::Result<()> {
             ],
             &["./protobufs/mirror/", "./protobufs/services/"],
         )?;
-
+    trace!();
     remove_useless_comments(&mirror_out_dir.join("proto.rs"))?;
-
+    trace!();
     // streams
     // NOTE: must be compiled in a separate folder otherwise it will overwrite the previous build
-
+    trace!();
     let streams_out_dir = Path::new(&env::var("OUT_DIR")?).join("streams");
     create_dir_all(&streams_out_dir)?;
-
+    trace!();
     // NOTE: **ALL** protobufs defined in basic_types must be specified here
     let cfg = tonic_build::configure();
     let cfg = builder::extern_basic_types(cfg);
-
+    trace!();
     cfg.out_dir(&streams_out_dir).compile(
         &["./protobufs/streams/account_balance_file.proto"],
         &["./protobufs/streams/", "./protobufs/services/"],
     )?;
-
+    trace!();
     // see note wrt services.
     remove_useless_comments(&streams_out_dir.join("proto.rs"))?;
-
+    trace!();
     // sdk
     // NOTE: must be compiled in a separate folder otherwise it will overwrite the previous build
     let sdk_out_dir = Path::new(&env::var("OUT_DIR")?).join("sdk");
     create_dir_all(&sdk_out_dir)?;
-
+    trace!();
     // note:
     // almost everything in services must be specified here.
     let cfg = tonic_build::configure();
@@ -261,15 +344,15 @@ fn main() -> anyhow::Result<()> {
         .services_same("UncheckedSubmitBody")
         .services_same("UtilPrngTransactionBody")
         .services_same("VirtualAddress");
-
+    trace!();
     cfg.out_dir(&sdk_out_dir).compile(
         &["./protobufs/sdk/transaction_list.proto"],
         &["./protobufs/sdk/", "./protobufs/services/"],
     )?;
-
+    trace!();
     // see note wrt services.
     remove_useless_comments(&sdk_out_dir.join("proto.rs"))?;
-
+    trace!();
     Ok(())
 }
 
