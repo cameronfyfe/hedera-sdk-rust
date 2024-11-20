@@ -56,24 +56,20 @@ fn main() -> anyhow::Result<()> {
 
     create_dir_all(&services_tmp_path)?;
 
-    // copy over services into our tmp path so we can edit
-    fs_extra::copy_items(
-        &[services_path],
-        &out_path,
-        &fs_extra::dir::CopyOptions::new().overwrite(true).copy_inside(false),
-    )?;
-    fs::rename(out_path.join("services"), &services_tmp_path)?;
-
-    let services: Vec<_> = read_dir(&services_tmp_path)?
+    let service_path_pairs: Vec<_> = read_dir(services_path)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
-            entry.file_type().ok()?.is_file().then(|| entry.path())
+            entry.file_type().ok()?.is_file().then(|| entry.path()).map(|path| {
+                let service_src_path = services_tmp_path
+                    .join(path.strip_prefix(services_path).unwrap());
+                (path, service_src_path)
+            })
         })
         .collect();
 
     // iterate through each file
     let re_package = RegexBuilder::new(r"^package (.*);$").multi_line(true).build()?;
-    for service in &services {
+    for (service, service_src) in &service_path_pairs {
         let contents = fs::read_to_string(service)?;
 
         // ensure that every `package _` entry is `package proto;`
@@ -82,8 +78,10 @@ fn main() -> anyhow::Result<()> {
         // remove com.hedera.hapi.node.addressbook. prefix
         let contents = contents.replace("com.hedera.hapi.node.addressbook.", "");
 
-        fs::write(service, &*contents)?;
+        fs::write(service_src, &*contents)?;
     }
+
+    let services: Vec<_> = service_path_pairs.iter().map(|(_, p)| p).collect();
 
     let mut cfg = tonic_build::configure()
         // We have already emitted a cargo directive to trigger a rerun on the source folder
